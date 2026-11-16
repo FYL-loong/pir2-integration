@@ -180,13 +180,19 @@ def gate_buffer() -> None:
         record("WARN", "Gate B 跳过", str(e))
 
 
-def gate_prefix_cache() -> None:
-    """Gate A：缓存前缀 KV 的单步结果 == 不走缓存的整段前向。"""
-    section("Gate A：前缀缓存等价性（会实例化模型）")
+def gate_prefix_cache(gate_dtype: str = "float32") -> None:
+    """Gate A：缓存前缀 KV 的单步结果 == 不走缓存的整段前向。
+
+    默认用 float32：bf16 下两条不同计算图本来就会差 1e-3 量级，
+    那不是逻辑错误，会把真正的 bug 淹没。float32 下应当收敛到 1e-6。
+    """
+    section(f"Gate A：前缀缓存等价性（{gate_dtype}）")
     if importlib.util.find_spec("jax") is None:
         record("SKIP", "Gate A", "没有 jax")
         return
     try:
+        import dataclasses
+
         import jax
         import jax.numpy as jnp
         from openpi.training import config as _config
@@ -202,11 +208,12 @@ def gate_prefix_cache() -> None:
         return
 
     try:
-        model = cfg.model.create(jax.random.key(0))
-        obs = cfg.model.fake_obs()
+        model_cfg = dataclasses.replace(cfg.model, dtype=gate_dtype)
+        model = model_cfg.create(jax.random.key(0))
+        obs = model_cfg.fake_obs()
         H = model.action_horizon
-        A = cfg.model.action_dim
-        x = jax.random.normal(jax.random.key(1), (1, H, A))
+        A = model_cfg.action_dim
+        x = jax.random.normal(jax.random.key(1), (1, H, A), dtype=jnp.float32)
         t = jnp.full((1, H), 0.5)
 
         # 路径 1：先用缓存
@@ -218,8 +225,9 @@ def gate_prefix_cache() -> None:
 
         # 路径 2：前缀和 suffix 一次性前向（compute_loss 用的路径）
         s_tokens, s_mask, s_ar, cond = model.embed_suffix(obs, x, t)
-        attn = make_attn_mask(jnp.concatenate([prefix_mask, s_mask], axis=1), jnp.concatenate([prefix_ar, s_ar]))
-        pos = jnp.cumsum(jnp.concatenate([prefix_mask, s_mask], axis=1), axis=-1) - 1
+        full_mask = jnp.concatenate([prefix_mask, s_mask], axis=1)
+        attn = make_attn_mask(full_mask, jnp.concatenate([prefix_ar, s_ar]))
+        pos = jnp.cumsum(full_mask, axis=-1) - 1
         (_, s_out), _ = model.PaliGemma.llm(
             [prefix_tokens, s_tokens], mask=attn, positions=pos, adarms_cond=[None, cond]
         )
@@ -229,10 +237,12 @@ def gate_prefix_cache() -> None:
 
         out_full = x + pir2_schedule.delta_t(1, H)[None, :, None] * v_full
         diff = float(jnp.max(jnp.abs(out_cached - out_full)))
-        if diff < 1e-4:
-            record("PASS", "Gate A", f"两条路径最大差异 {diff:.2e}")
+        scale = float(jnp.max(jnp.abs(out_full))) + 1e-6
+        tol = 1e-4 if gate_dtype == "float32" else 5e-3
+        if diff < tol:
+            record("PASS", "Gate A", f"{gate_dtype} 最大差异 {diff:.2e}（相对 {diff/scale:.2e}，阈值 {tol:g}）")
         else:
-            record("FAIL", "Gate A", f"最大差异 {diff:.2e}，缓存路径与整段前向不一致")
+            record("FAIL", "Gate A", f"{gate_dtype} 最大差异 {diff:.2e}（相对 {diff/scale:.2e}，阈值 {tol:g}）")
     except Exception as e:  # noqa: BLE001
         record("FAIL", "Gate A", f"{type(e).__name__}: {e}")
 
@@ -241,6 +251,12 @@ def gate_prefix_cache() -> None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--gates", action="store_true", help="额外跑 Gate A（会实例化 3B 模型，需要 GPU）")
+    ap.add_argument(
+        "--gate-dtype",
+        default="float32",
+        choices=["float32", "bfloat16"],
+        help="Gate A 用哪种精度；bf16 下两条计算图本来就会差 1e-3 量级",
+    )
     args = ap.parse_args()
 
     print("πR² on π0.5 —— 平台自检")
@@ -253,7 +269,7 @@ def main() -> int:
     check_openpi()
     gate_buffer()
     if args.gates:
-        gate_prefix_cache()
+        gate_prefix_cache(args.gate_dtype)
 
     section("汇总")
     n_fail = sum(1 for s, _, _ in RESULTS if s == "FAIL")
