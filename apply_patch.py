@@ -229,6 +229,81 @@ EDITS: list[tuple[str, str, str, str]] = [
 ]
 
 
+# --------------------------------------------------------------------------- π0.5 状态通道
+# 只有在 --pi05-state 时应用。设计要点：prompt 里的离散状态**保留不动**，
+# 只在动作专家的 suffix 里加一个连续 state token，让本体感觉能每 tick 刷新。
+PI05_EDITS: list[tuple[str, str, str, str]] = [
+    (
+        "src/openpi/models/pi0_config.py",
+        "    # [pir2] 阶梯抖动量、标准 flow 预热分支比例\n"
+        "    pir2_jitter: float = 0.05\n"
+        "    pir2_warmup_prob: float = 0.2\n",
+        "    # [pir2] 阶梯抖动量、标准 flow 预热分支比例\n"
+        "    pir2_jitter: float = 0.05\n"
+        "    pir2_warmup_prob: float = 0.2\n"
+        "    # [pir2] π0.5 连续状态快通道：prompt 保留离散状态，suffix 额外加连续 state token\n"
+        "    pir2_pi05_state: bool = False\n",
+        "pi0_config.py: 增加 pir2_pi05_state",
+    ),
+    (
+        "src/openpi/models/pi0.py",
+        '        self.pir2_warmup_prob = getattr(config, "pir2_warmup_prob", 0.2)\n',
+        '        self.pir2_warmup_prob = getattr(config, "pir2_warmup_prob", 0.2)\n'
+        '        self.pir2_pi05_state = bool(getattr(config, "pir2_pi05_state", False))\n'
+        "        # [pir2] π0.5 的快通道需要一个连续状态投影；prompt 里的离散状态不受影响\n"
+        "        if config.pi05 and self.pir2_pi05_state:\n"
+        "            self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)\n",
+        "pi0.py: π0.5 增加 state_proj（新参数，加载时允许缺失）",
+    ),
+    (
+        "src/openpi/models/pi0.py",
+        "        if not self.pi05:\n            # add a single state token\n",
+        "        if (not self.pi05) or self.pir2_pi05_state:\n"
+        "            # add a single state token  [pir2] π0.5 也走这条：连续状态进 suffix\n",
+        "pi0.py: embed_suffix 给 π0.5 加连续 state token",
+    ),
+    (
+        "src/openpi/models/model.py",
+        "    def load(self, params: at.Params, *, remove_extra_params: bool = True) -> \"BaseModel\":\n"
+        '        """Create a model with the given parameters."""\n'
+        "        model = nnx.eval_shape(self.create, jax.random.key(0))\n"
+        "        graphdef, state = nnx.split(model)\n"
+        "        if remove_extra_params:\n"
+        "            params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)\n"
+        "        at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)\n"
+        "        state.replace_by_pure_dict(params)\n"
+        "        return nnx.merge(graphdef, state)\n",
+        "    def load(self, params: at.Params, *, remove_extra_params: bool = True) -> \"BaseModel\":\n"
+        '        """Create a model with the given parameters."""\n'
+        "        model = nnx.eval_shape(self.create, jax.random.key(0))\n"
+        "        graphdef, state = nnx.split(model)\n"
+        "        expected = state.to_pure_dict()\n"
+        "        if remove_extra_params:\n"
+        "            params = ocp.transform_utils.intersect_trees(expected, params)\n"
+        "\n"
+        "        # [pir2] 模型可能比预训练权重多出参数（如 π0.5 快通道的 state_proj）。\n"
+        "        # 缺失项沿用初始化值，其余结构仍然严格匹配。\n"
+        "        filled = []\n"
+        "\n"
+        "        def _fill(exp, got, path=\"\"):\n"
+        "            if isinstance(exp, dict):\n"
+        "                got = got if isinstance(got, dict) else {}\n"
+        "                return {k: _fill(exp[k], got.get(k), f\"{path}/{k}\") for k in exp}\n"
+        "            if got is None:\n"
+        "                filled.append(path)\n"
+        "                return exp\n"
+        "            return got\n"
+        "\n"
+        "        params = _fill(expected, params)\n"
+        "        if filled:\n"
+        "            logger.warning(\"[pir2] %d 个参数在 checkpoint 中缺失，已用初始化值：%s\", len(filled), filled[:5])\n"
+        "        state.replace_by_pure_dict(params)\n"
+        "        return nnx.merge(graphdef, state)\n",
+        "model.py: 权重加载容忍新增参数",
+    ),
+]
+
+
 def apply_edit(path: Path, old: str, new: str, desc: str, *, dry: bool) -> str:
     text = path.read_text(encoding="utf-8")
     if new in text:
@@ -249,6 +324,11 @@ def main() -> int:
     ap.add_argument("--openpi-dir", default="openpi", type=Path)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--check", action="store_true")
+    ap.add_argument(
+        "--pi05-state",
+        action="store_true",
+        help="额外打 π0.5 连续状态快通道的补丁（新参数 state_proj + 容忍缺失加载）",
+    )
     args = ap.parse_args()
 
     root = args.openpi_dir.expanduser().resolve()
@@ -274,7 +354,10 @@ def main() -> int:
         print(f"copy   {dst_rel}")
 
     # 文本改动
-    for rel, old, new, desc in EDITS:
+    edits = list(EDITS)
+    if args.pi05_state:
+        edits += PI05_EDITS
+    for rel, old, new, desc in edits:
         path = root / rel
         if not path.exists():
             print(f"MISS   {rel}（文件不存在）")

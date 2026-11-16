@@ -127,11 +127,15 @@ def check_openpi() -> None:
     try:
         from openpi.models import pi0_config
 
-        has = any(f.name == "pir2_mode" for f in __import__("dataclasses").fields(pi0_config.Pi0Config))
-        if has:
+        fields = {f.name for f in __import__("dataclasses").fields(pi0_config.Pi0Config)}
+        if "pir2_mode" in fields:
             record("PASS", "补丁：Pi0Config.pir2_mode", "已应用")
         else:
             record("FAIL", "补丁：Pi0Config.pir2_mode", "未应用，先跑 apply_patch.py")
+        if "pir2_pi05_state" in fields:
+            record("PASS", "补丁：π0.5 状态快通道", "已应用（pir2_pi05_state）")
+        else:
+            record("WARN", "补丁：π0.5 状态快通道", "未应用；只能跑 π0 底座，加 --pi05-state 重打")
     except Exception as e:  # noqa: BLE001
         record("FAIL", "补丁检查", str(e))
 
@@ -201,11 +205,17 @@ def gate_prefix_cache(gate_dtype: str = "float32") -> None:
         record("SKIP", "Gate A", f"导入失败：{e}")
         return
 
-    try:
-        cfg = _config.get_config("pir2_staircase")
-    except Exception as e:  # noqa: BLE001
-        record("SKIP", "Gate A", f"拿不到 pir2_staircase 配置：{e}")
+    cfg = None
+    for name in ("pir2_staircase_pi05", "pir2_staircase"):
+        try:
+            cfg = _config.get_config(name)
+            break
+        except Exception:  # noqa: BLE001, S112
+            continue
+    if cfg is None:
+        record("SKIP", "Gate A", "没有可用的 pir2_staircase 配置")
         return
+    print(f"     使用配置：{cfg.name}（pi05={cfg.model.pi05}）")
 
     try:
         model_cfg = dataclasses.replace(cfg.model, dtype=gate_dtype)
