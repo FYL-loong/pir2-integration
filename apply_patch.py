@@ -215,6 +215,16 @@ EDITS: list[tuple[str, str, str, str]] = [
         "        scale, shift, gate = jnp.split(modulation, 3, axis=-1)\n",
         "gemma.py: adaRMSNorm 支持逐位置条件",
     ),
+    # 11. 放宽 Module.__call__ 的类型注解，否则逐位置条件会被 jaxtyping 拒绝
+    (
+        "src/openpi/models/gemma.py",
+        '        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,\n',
+        "        # [pir2] 允许 [b _d]（整块共享）或 [b t _d]（逐位置）两种条件\n"
+        '        adarms_cond: Sequence[\n'
+        '            at.Float[at.Array, "b _d"] | at.Float[at.Array, "b t _d"] | None\n'
+        "        ] | None = None,\n",
+        "gemma.py: 放宽 adarms_cond 类型注解到逐位置",
+    ),
     # 11. 注册配置
     (
         "src/openpi/training/config.py",
