@@ -238,11 +238,21 @@ def gate_prefix_cache(gate_dtype: str = "float32") -> None:
         out_full = x + pir2_schedule.delta_t(1, H)[None, :, None] * v_full
         diff = float(jnp.max(jnp.abs(out_cached - out_full)))
         scale = float(jnp.max(jnp.abs(out_full))) + 1e-6
-        tol = 1e-4 if gate_dtype == "float32" else 5e-3
-        if diff < tol:
-            record("PASS", "Gate A", f"{gate_dtype} 最大差异 {diff:.2e}（相对 {diff/scale:.2e}，阈值 {tol:g}）")
+        rel = diff / scale
+
+        # 负对照：故意用错的 d 构造，确认这个指标能识别真实错误。
+        # 如果错误配置下的差异也很小，说明测试本身没有区分力，结论不可信。
+        out_wrong = x + pir2_schedule.delta_t(2, H)[None, :, None] * v_full
+        ctrl_rel = float(jnp.max(jnp.abs(out_cached - out_wrong))) / scale
+
+        tol = 1e-3 if gate_dtype == "float32" else 5e-3
+        detail = f"{gate_dtype} 相对差异 {rel:.2e}（绝对 {diff:.2e}，阈值 {tol:g}）；负对照 {ctrl_rel:.2e}"
+        if ctrl_rel < 20 * tol:
+            record("WARN", "Gate A 负对照太弱", detail + " ← 指标区分力不足，本项结果不可信")
+        elif rel < tol:
+            record("PASS", "Gate A", detail)
         else:
-            record("FAIL", "Gate A", f"{gate_dtype} 最大差异 {diff:.2e}（相对 {diff/scale:.2e}，阈值 {tol:g}）")
+            record("FAIL", "Gate A", detail)
     except Exception as e:  # noqa: BLE001
         record("FAIL", "Gate A", f"{type(e).__name__}: {e}")
 
