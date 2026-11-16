@@ -246,17 +246,22 @@ def gate_prefix_cache(gate_dtype: str = "float32") -> None:
         out_ctrl = x + pir2_schedule.delta_t(1, H)[None, :, None] * ctrl_v
         ctrl_rel = float(jnp.max(jnp.abs(out_cached - out_ctrl))) / scale
 
+        # 判据分两层，避免"调阈值放行"：
+        #   1) 路径相对差必须小于精度容差
+        #   2) 10% 扰动带来的差异必须远大于该路径差（自校准的分离比）
+        # 分离比大，说明观测到的差异是数值噪声；分离比小，说明这个指标分辨不出问题。
+        sep = ctrl_rel / max(rel, 1e-12)
         tol = 1e-3 if gate_dtype == "float32" else 5e-3
         detail = (
-            f"{gate_dtype} 相对差异 {rel:.2e}（绝对 {diff:.2e}，阈值 {tol:g}）；"
-            f"10% 扰动对照 {ctrl_rel:.2e}"
+            f"{gate_dtype} 相对差异 {rel:.2e}（阈值 {tol:g}）；"
+            f"10% 扰动对照 {ctrl_rel:.2e}；分离比 {sep:.0f}×（要求 ≥50×）"
         )
-        if ctrl_rel < 10 * tol:
+        if rel >= tol:
+            record("FAIL", "Gate A", detail + " ← 两条路径不一致")
+        elif sep < 50:
             record("WARN", "Gate A 对照失效", detail + " ← 指标区分力不足，本项结果不可信")
-        elif rel < tol:
-            record("PASS", "Gate A", detail)
         else:
-            record("FAIL", "Gate A", detail)
+            record("PASS", "Gate A", detail)
     except Exception as e:  # noqa: BLE001
         record("FAIL", "Gate A", f"{type(e).__name__}: {e}")
 
