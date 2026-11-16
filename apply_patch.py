@@ -216,12 +216,13 @@ EDITS: list[tuple[str, str, str, str]] = [
         "gemma.py: adaRMSNorm 支持逐位置条件",
     ),
     # 11. 放宽 Module.__call__ 的类型注解，否则逐位置条件会被 jaxtyping 拒绝
+    #     注意轴名必须用 _t（embedded 的序列轴），不能用 t（positions 的整段序列轴）
     (
         "src/openpi/models/gemma.py",
         '        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,\n',
-        "        # [pir2] 允许 [b _d]（整块共享）或 [b t _d]（逐位置）两种条件\n"
-        '        adarms_cond: Sequence[\n'
-        '            at.Float[at.Array, "b _d"] | at.Float[at.Array, "b t _d"] | None\n'
+        "        # [pir2] 允许 [b _d]（整块共享）或 [b _t _d]（逐位置）两种条件\n"
+        "        adarms_cond: Sequence[\n"
+        '            at.Float[at.Array, "b _d"] | at.Float[at.Array, "b _t _d"] | None\n'
         "        ] | None = None,\n",
         "gemma.py: 放宽 adarms_cond 类型注解到逐位置",
     ),
@@ -346,6 +347,24 @@ def _marker(old: str, new: str) -> str | None:
     return None
 
 
+# --------------------------------------------------------------------------- 修正项
+# 用于修复历史版本打错的补丁（可选执行：锚点不存在就跳过）。
+FIXUPS: list[tuple[str, str, str, str]] = [
+    (
+        "src/openpi/models/gemma.py",
+        "        # [pir2] 允许 [b _d]（整块共享）或 [b t _d]（逐位置）两种条件\n"
+        "        adarms_cond: Sequence[\n"
+        '            at.Float[at.Array, "b _d"] | at.Float[at.Array, "b t _d"] | None\n'
+        "        ] | None = None,\n",
+        "        # [pir2] 允许 [b _d]（整块共享）或 [b _t _d]（逐位置）两种条件\n"
+        "        adarms_cond: Sequence[\n"
+        '            at.Float[at.Array, "b _d"] | at.Float[at.Array, "b _t _d"] | None\n'
+        "        ] | None = None,\n",
+        "修正：adaRMS 条件注解的轴名 t -> _t",
+    ),
+]
+
+
 def apply_edit(path: Path, old: str, new: str, desc: str, *, dry: bool) -> str:
     text = path.read_text(encoding="utf-8")
     mark = _marker(old, new)
@@ -397,6 +416,18 @@ def main() -> int:
         print(f"copy   {dst_rel}")
 
     # 文本改动
+    # 先跑修正项：只对"历史版本打错"的树生效，锚点不存在就静默跳过
+    for rel, old, new, desc in FIXUPS:
+        path = root / rel
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        if old in text:
+            if not (args.dry_run or args.check):
+                path.write_text(text.replace(old, new, 1), encoding="utf-8")
+            print(f"{'would ' if args.dry_run else ''}fix    {desc}")
+            ok += 1
+
     edits = list(EDITS)
     if args.pi05_state:
         edits += PI05_EDITS
