@@ -314,9 +314,23 @@ PI05_EDITS: list[tuple[str, str, str, str]] = [
 ]
 
 
+def _marker(old: str, new: str) -> str | None:
+    """取 new 里第一行“old 中没有的”内容作为已应用标志。
+
+    只比对整段 new 太脆弱：后续补丁可能在 old/new 之间插入新行，
+    导致明明已应用却被判成锚点丢失。
+    """
+    old_lines = set(old.splitlines())
+    for line in new.splitlines():
+        if line.strip() and line not in old_lines:
+            return line
+    return None
+
+
 def apply_edit(path: Path, old: str, new: str, desc: str, *, dry: bool) -> str:
     text = path.read_text(encoding="utf-8")
-    if new in text:
+    mark = _marker(old, new)
+    if mark and mark in text:
         return f"skip   {desc}（已应用）"
     n = text.count(old)
     if n != 1:
