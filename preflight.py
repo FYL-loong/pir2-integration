@@ -261,13 +261,23 @@ def gate_prefix_cache(gate_dtype: str = "float32") -> None:
         #   2) 10% 扰动带来的差异必须远大于该路径差（自校准的分离比）
         # 分离比大，说明观测到的差异是数值噪声；分离比小，说明这个指标分辨不出问题。
         sep = ctrl_rel / max(rel, 1e-12)
+
+        # 控制 2：换一份前缀 KV，输出必须跟着变 —— 否则说明缓存压根没被用上，
+        # 上面"两条路径一致"就成了空话。
+        prefix_tokens2 = prefix_tokens + 1.0
+        _, kv2 = model.PaliGemma.llm([prefix_tokens2, None], mask=pre_attn, positions=pre_pos)
+        out_kv2 = model.sample_actions_step(obs, x, t, kv2, prefix_mask, d=1)
+        kv_ctrl = float(jnp.max(jnp.abs(out_kv2 - out_cached))) / scale
+
         tol = 1e-3 if gate_dtype == "float32" else 5e-3
         detail = (
             f"{gate_dtype} 相对差异 {rel:.2e}（阈值 {tol:g}）；"
-            f"10% 扰动对照 {ctrl_rel:.2e}；分离比 {sep:.0f}×（要求 ≥50×）"
+            f"速度扰动对照 {ctrl_rel:.2e}；换前缀对照 {kv_ctrl:.2e}；分离比 {sep:.0f}×"
         )
         if rel >= tol:
             record("FAIL", "Gate A", detail + " ← 两条路径不一致")
+        elif kv_ctrl < 1e-2:
+            record("WARN", "Gate A 缓存未生效", detail + " ← 换掉 KV 输出几乎不变，说明缓存没被使用")
         elif sep < 50:
             record("WARN", "Gate A 对照失效", detail + " ← 指标区分力不足，本项结果不可信")
         else:
