@@ -273,6 +273,25 @@ PI05_EDITS: list[tuple[str, str, str, str]] = [
         "pi0.py: embed_suffix 给 π0.5 加连续 state token",
     ),
     (
+        "src/openpi/models/pi0.py",
+        "            action_expert_tokens = action_tokens\n"
+        "            adarms_cond = time_emb\n",
+        "            action_expert_tokens = action_tokens\n"
+        "            adarms_cond = time_emb\n"
+        "            # [pir2] suffix 多了一个干净的 state token，它的 adaRMS 条件也要多一行（t=0）\n"
+        "            if self.pir2_pi05_state and jnp.ndim(adarms_cond) == 3:\n"
+        "                _e0 = posemb_sincos(\n"
+        "                    jnp.zeros(timestep.shape[:1], timestep.dtype),\n"
+        "                    self.action_in_proj.out_features,\n"
+        "                    min_period=4e-3,\n"
+        "                    max_period=4.0,\n"
+        "                )\n"
+        "                _e0 = self.time_mlp_out(nnx.swish(self.time_mlp_in(_e0)))\n"
+        "                _e0 = nnx.swish(_e0)\n"
+        "                adarms_cond = jnp.concatenate([_e0[:, None, :], adarms_cond], axis=1)\n",
+        "pi0.py: state token 补一行 adaRMS 条件（长度对齐）",
+    ),
+    (
         "src/openpi/models/model.py",
         "    def load(self, params: at.Params, *, remove_extra_params: bool = True) -> \"BaseModel\":\n"
         '        """Create a model with the given parameters."""\n'
