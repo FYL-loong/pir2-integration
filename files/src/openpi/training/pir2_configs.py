@@ -58,6 +58,15 @@ def _cfg(name: str, mode: str, *, pi05: bool, lora: bool = False):
         d_max_vis=D_MAX_VIS,
     )
     if pi05:
+        # 需要 --pi05-state 补丁；没打时给一个能看懂的报错，而不是 TypeError
+        import dataclasses as _dc
+
+        _fields = {f.name for f in _dc.fields(pi0_config.Pi0Config)}
+        if "pir2_pi05_state" not in _fields:
+            raise RuntimeError(
+                "π0.5 配置需要连续状态快通道补丁：先跑 "
+                "`python apply_patch.py --openpi-dir . --pi05-state`，再重新 import。"
+            )
         # 关键：保留 prompt 里的离散状态，同时给动作专家加一个连续状态 token
         model_kwargs["pir2_pi05_state"] = True
 

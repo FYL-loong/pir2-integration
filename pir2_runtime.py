@@ -86,9 +86,22 @@ class RollingBuffer:
         self.t[: inflight.shape[0]] = 0.0
 
     def apply(self, velocity: np.ndarray, d: int) -> np.ndarray:
-        """一步 Euler -> 取出 [d, 2d) -> 滑动。"""
-        self.x = self.x + delta_t(d, self.h)[:, None] * velocity
+        """一步 Euler -> 取出 [d, 2d) -> 滑动。输入是**速度**。"""
+        dt = delta_t(d, self.h)
+        self.x = self.x + dt[:, None] * velocity
+        self.t = np.clip(self.t + dt, 0.0, 1.0)
+        return self._emit_and_slide(d)
+
+    def commit(self, new_x: np.ndarray, d: int) -> np.ndarray:
+        """输入是**已更新好的 buffer_x**（例如 model.sample_actions_step 的返回值）。
+
+        注意：不要把已经更新过的 buffer_x 再送给 apply()，那会积分两次。
+        """
+        self.x = np.asarray(new_x, dtype=np.float32)
         self.t = np.clip(self.t + delta_t(d, self.h), 0.0, 1.0)
+        return self._emit_and_slide(d)
+
+    def _emit_and_slide(self, d: int) -> np.ndarray:
         out = self.x[d : 2 * d].copy()
         fresh = np.random.standard_normal((d, self.a)).astype(np.float32)
         self.x = np.concatenate([self.x[d:], fresh], axis=0)
@@ -156,11 +169,11 @@ class Pir2Runtime:
         obs = get_obs()
         d = self.lat.d()
         t0 = time.perf_counter()
-        v = step_fn(obs, self.buf.x, self.buf.t, kv, mask, d)
+        new_x = step_fn(obs, self.buf.x, self.buf.t, kv, mask, d)
         self.lat.add(time.perf_counter() - t0)
-        actions = self.buf.apply(np.asarray(v), d)
-        # 一次调用产出 d 个动作；这里简单返回第一个，其余交给调用方排队
-        return actions
+        # step_fn 返回的已经是更新后的 buffer_x，这里只做"取出 + 滑动"，
+        # 不要再乘 delta_t（那样会积分两次）
+        return self.buf.commit(np.asarray(new_x), d)
 
     def stop(self):
         self._stop.set()

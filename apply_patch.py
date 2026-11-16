@@ -71,6 +71,18 @@ EDITS: list[tuple[str, str, str, str]] = [
         "        # This attribute gets automatically set by model.train() and model.eval().\n",
         "pi0.py: __init__ 记录 πR² 配置",
     ),
+    # 2b. 声明的 H 与 d_max 必须满足 H > 2d，否则调度会静默退化
+    (
+        "src/openpi/models/pi0.py",
+        '        self.pir2_d_max_vis = getattr(config, "d_max_vis", 5)\n',
+        '        self.pir2_d_max_vis = getattr(config, "d_max_vis", 5)\n'
+        '        if self.pir2_mode != "flow" and config.action_horizon <= 2 * self.pir2_d_max:\n'
+        "            raise ValueError(\n"
+        '                f"πR² 需要 action_horizon > 2 * d_max，收到 H={config.action_horizon}, "\n'
+        '                f"d_max={self.pir2_d_max}。请调小 d_max 或加大 action_horizon。"\n'
+        "            )\n",
+        "pi0.py: 校验 H > 2*d_max",
+    ),
     # 3. compute_loss：换成逐位置时间步 + 前段 inpaint
     (
         "src/openpi/models/pi0.py",
@@ -162,7 +174,14 @@ EDITS: list[tuple[str, str, str, str]] = [
         "            _code = posemb_sincos(\n"
         "                _dvis.astype(jnp.float32), action_tokens.shape[-1], min_period=4e-3, max_period=4.0\n"
         "            )\n"
-        "            action_tokens = action_tokens + 0.1 * _code[:, None, :]\n",
+        "            _zero = posemb_sincos(\n"
+        "                jnp.zeros_like(_dvis, dtype=jnp.float32),\n"
+        "                action_tokens.shape[-1],\n"
+        "                min_period=4e-3,\n"
+        "                max_period=4.0,\n"
+        "            )\n"
+        "            # 减去 dvis=0 的编码，保证无延迟时与原模型完全一致\n"
+        "            action_tokens = action_tokens + 0.1 * (_code - _zero)[:, None, :]\n",
         "pi0.py: 视觉陈旧度编码",
     ),
     # 9. 三步之外的：单步推理方法
@@ -361,6 +380,25 @@ FIXUPS: list[tuple[str, str, str, str]] = [
         '            at.Float[at.Array, "b _d"] | at.Float[at.Array, "b _t _d"] | None\n'
         "        ] | None = None,\n",
         "修正：adaRMS 条件注解的轴名 t -> _t",
+    ),
+    (
+        "src/openpi/models/pi0.py",
+        "            _code = posemb_sincos(\n"
+        "                _dvis.astype(jnp.float32), action_tokens.shape[-1], min_period=4e-3, max_period=4.0\n"
+        "            )\n"
+        "            action_tokens = action_tokens + 0.1 * _code[:, None, :]\n",
+        "            _code = posemb_sincos(\n"
+        "                _dvis.astype(jnp.float32), action_tokens.shape[-1], min_period=4e-3, max_period=4.0\n"
+        "            )\n"
+        "            _zero = posemb_sincos(\n"
+        "                jnp.zeros_like(_dvis, dtype=jnp.float32),\n"
+        "                action_tokens.shape[-1],\n"
+        "                min_period=4e-3,\n"
+        "                max_period=4.0,\n"
+        "            )\n"
+        "            # 减去 dvis=0 的编码，保证无延迟时与原模型完全一致\n"
+        "            action_tokens = action_tokens + 0.1 * (_code - _zero)[:, None, :]\n",
+        "修正：视觉陈旧度编码在 dvis=0 时归零",
     ),
 ]
 
